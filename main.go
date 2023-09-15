@@ -9,6 +9,8 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
+	"time"
 )
 
 type Person struct {
@@ -36,22 +38,31 @@ func (person *Person) download(bookInfo gjson.Result) {
 	person.bookName = bookInfo.Get("book_name").String()
 	if person.bookName == "" {
 		log.Fatalf("bookId:%s,获取书籍信息失败", person.bookId)
+	} else {
+		fmt.Println("开始下载:", person.bookName)
 	}
 	person.chaptersDir = person.newFile(path.Join(person.saveDir, person.bookName, "chapters"))
-
+	wg := sync.WaitGroup{}
 	for _, chapter := range person.client.NewCatalogByBookIDApi(person.bookId) {
-		chapterId := chapter.Get("chapter_id").String()
-		if chapter.Get("auth_access").String() == "1" &&
-			!person.exists(path.Join(person.chaptersDir, chapterId+".txt")) {
+		wg.Add(1)
+		go func(chapter gjson.Result, wg *sync.WaitGroup) {
+			defer wg.Done()
+			chapterId := chapter.Get("chapter_id").String()
+			if chapter.Get("auth_access").String() == "1" &&
+				!person.exists(path.Join(person.chaptersDir, chapterId+".txt")) {
 
-			command := person.client.ChapterCommandApi(chapterId).Get("data.command").String()
-			if content := person.client.ChapterInfoApi(chapterId, command); content != "" {
-				person.writeFile(path.Join(person.chaptersDir, chapterId+".txt"), content)
+				command := person.client.ChapterCommandApi(chapterId).Get("data.command").String()
+				if content := person.client.ChapterInfoApi(chapterId, command); content != "" {
+					fmt.Println(chapter.Get("chapter_title").String(), " 下载完成!\r")
+					person.writeFile(path.Join(person.chaptersDir, chapterId+".txt"), content)
+				}
+			} else {
+				log.Println("chapterId:", chapterId, "warning:该章节需要付费或者已经下载过了")
 			}
-		} else {
-			log.Println("chapterId:", chapterId, "warning:该章节需要付费或者已经下载过了")
-		}
+		}(chapter, &wg)
 	}
+	wg.Wait()
+	fmt.Println(person.bookName, "下载完毕!")
 }
 func (person *Person) outFile() {
 	p := path.Join(path.Dir(person.chaptersDir), person.bookName+".txt")
@@ -65,15 +76,18 @@ func (person *Person) outFile() {
 	}
 	defer file.Close()
 	for _, chapter := range person.client.NewCatalogByBookIDApi(person.bookId) {
-		if person.exists(path.Join(person.chaptersDir, chapter.Get("chapter_id").String()+".txt")) {
-			content, err := os.ReadFile(path.Join(person.chaptersDir, chapter.Get("chapter_id").String()+".txt"))
+		chapterId := chapter.Get("chapter_id").String()
+		if person.exists(path.Join(person.chaptersDir, chapterId+".txt")) {
+			content, err := os.ReadFile(path.Join(person.chaptersDir, chapterId+".txt"))
 			if err != nil {
 				log.Println("读取文件失败:", err)
 			} else {
-				_, _ = file.Write([]byte(chapter.Get("chapter_id").String() + "\n" + string(content) + "\n\n"))
+				_, _ = file.Write([]byte(chapter.Get("chapter_title").String() + "\n" + string(content) + "\n\n"))
 			}
 		}
 	}
+	fmt.Printf("\n<%v>合并完毕,三秒后自动关闭终端", person.bookName)
+	time.Sleep(3000 * time.Second)
 }
 
 func (person *Person) newFile(name string) string {
@@ -106,7 +120,6 @@ func main() {
 	flag.StringVar(&person.account, "a", "", "set account")
 	flag.StringVar(&person.loginToken, "t", "", "set login token")
 	flag.Parse()
-
 	if person.loginToken != "" && person.account != "" {
 		if len(person.loginToken) != 32 {
 			log.Fatalf("token长度不正确,必须为32位")
